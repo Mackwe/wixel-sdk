@@ -144,7 +144,7 @@ static volatile BIT got_packet;			// flag to indicate we have captured a packet.
 static volatile BIT got_ok;				// flag indicating we got OK from the HM-1x
 static volatile BIT do_leds;			// flag indicating to NOT show LEDs
 static volatile BIT send_debug;			// flag indicating to send debug output
-static volatile BIT sleep_ble;			// flag indicating to sleep the BLE module (power down in sleep)
+static volatile BIT sleep_ble;			// flag indicating to sleep the BLE module (using AT+SLEEP command)
 static volatile BIT scanning_for_packet;// flag indicating that we are scanning for a packet
 static volatile uint32 dly_ms = 0;
 static volatile uint32 pkt_time = 0;
@@ -901,8 +901,6 @@ void makeAllOutputs(BIT value)
     int i;
     for (i=10;i <= 17; i++)
 	{
-		if( i == 10 && !(sleep_ble))
-			continue;
 		setDigitalOutput(i, value);
     }
 }
@@ -1564,6 +1562,7 @@ int doCommand()
 			getFlag(XBRIDGE_HW),
 			getFlag(SEND_DEBUG),
 			getFlag(DO_LEDS));
+		printf_fast("ble sleeping: %u, ble connected: %u\r\n", ble_sleeping, ble_connected);
 		printf_fast("battery_capacity: %u\r\n", battery_capacity);
 		printf_fast("fOffsets: %x, %x, %x, %x\r\n", fOffset[0], fOffset[1], fOffset[2], fOffset[3]);
 //		printf_fast("MDMCFG4: %x, MDMCFG3: %x\r\n", MDMCFG4,MDMCFG3); 
@@ -1605,19 +1604,23 @@ int doCommand()
 		else
 			printf_fast("LEDs are off\r\n");
 	}
-	if(commandBuffIs("OK")) {
+	if(got_ok == 0 && commandBuffIs("OK")) {
+		printf_fast("\r\ngot OK...\r\n");
 		got_ok = 1;
 		return(0);
 	}
-/*	if(commandBuffIs("OK+SLEE")) {
-		ble_sleeping=1;
+	if(commandBuffIs("OK+SLEE")) {
+		printf_fast("\r\ngot OK SLEEP...\r\n");
+		ble_sleeping = 1;
+		ble_connected = 0;
 		return(0);
 	}
 	if(commandBuffIs("OK+WAKE")) {
-		ble_sleeping=0;
+		printf_fast("\r\ngot OK WAKE...\r\n");
+		ble_sleeping = 0;
 		return(0);
 	}
-*/	// we don't respond to unrecognised commands.
+	// we don't respond to unrecognised commands.
 	return 1;
 }
 
@@ -1625,16 +1628,24 @@ int doCommand()
 int controlProtocolService()
 {
 	static uint32 cmd_to;
+	static uint32 ts_waiting;
+	static uint8 waiting_ok;
+	static uint8 handle_command;
+	static uint8 i;
 	// ok this is where we check if there's anything happening incoming on the USB COM port or UART 0 port.
 	int nRet = 1;
 	uint8 b;
-	//if we have timed out waiting for a command, clear the command buffer and return.
-	if(command_buff.nCurReadPos > 0 && (getMs() - cmd_to) > 2000)
+
+	if ((command_buff.nCurReadPos > 0) && ((getMs() - cmd_to) > 2000))
 	{
+		//if we have timed out waiting for a command, clear the command buffer and return.
+		printf_fast("\r\nCMD TIMEOUT\r\n");
 		// clear command buffer if there was anything
 		init_command_buff(&command_buff);
 		return nRet;
-	}	
+	}
+
+	handle_command = 0;
 	//while we have something in either buffer,
 	while((usbComRxAvailable() || uart1RxAvailable()) && command_buff.nCurReadPos < USB_COMMAND_MAXLEN)
 	{
@@ -1645,7 +1656,7 @@ int controlProtocolService()
 		else {
 			b = uart1RxReceiveByte();
 		}
-		//putchar(b);
+		putchar(b);
 //		if(send_debug)
 //			printf_fast("%c",b);
 		command_buff.commandBuffer[command_buff.nCurReadPos] = b;
@@ -1654,23 +1665,58 @@ int controlProtocolService()
 		// reset the command timeout.
 		cmd_to = getMs();
 		// if it is the end for the byte string, we need to process the command
-		if(command_buff.nCurReadPos == command_buff.commandBuffer[0] || (command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x53 )) || (command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x44 )) || (command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x42 )) || (command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x4c )) || (command_buff.nCurReadPos == 2 && command_buff.commandBuffer[0] == 0x4F))
+		if(command_buff.nCurReadPos == command_buff.commandBuffer[0] ||
+				(command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x53 )) || // 'S/s'
+				(command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x44 )) || // 'D/d'
+				(command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x42 )) || // 'B/b'
+				(command_buff.nCurReadPos == 1 && ((command_buff.commandBuffer[0] & 0x5F) == 0x4c ))) // 'L/l'
 		{
-			// ok we got the end of a command;
-			if(command_buff.nCurReadPos)
-			{
-//				printf_fast("Processing Command\r\n");
-				// do the command
-				nRet = doCommand();
-				//re-initialise the command buffer for the next one.
-				init_command_buff(&command_buff);
-				// break out if we got a breaking command
-				if(!nRet)
-					return nRet;
+			handle_command = 1;
+		}
+		else if (command_buff.nCurReadPos >= 1 && (command_buff.commandBuffer[0] == 0x4F)) { // 'O'
+			printf_fast("\r\n%lu OK_BUFFER (%u): ", getMs(), command_buff.nCurReadPos);
+			for (i=0; i<command_buff.nCurReadPos;i++) putchar(command_buff.commandBuffer[i]);
+
+			if ((command_buff.nCurReadPos == 1) && !waiting_ok) {  // 'OK' --> OK,OK+SLEE,OK+WAKE
+				// we got something that starts starts with an "OK" - we want to wait for 100ms for further chars...
+				waiting_ok = 1;
+				handle_command = 0;
+				ts_waiting = getMs();
+			}
+			else if ((command_buff.nCurReadPos == 7) && waiting_ok) {  // 'OK+SLEE','OK+WAKE'
+				waiting_ok = 0;
+				handle_command = 1;
+			}
+			else if ((command_buff.nCurReadPos >= 2) && (getMs() - ts_waiting > 100)) {
+				// timeout, handle what we have...
+				waiting_ok = 0;
+				handle_command = 1;
 			}
 		}
 		// otherwise, if the command is not up to the maximum length, add the character to the buffer.
 	}
+	//if we timed out waiting for an OK command completion, run the command
+	if (waiting_ok && ((getMs() - ts_waiting) > 100)) {
+		printf_fast("\r\nOK TIMEOUT\r\n");
+		waiting_ok = 0;
+		handle_command = 1;
+	}
+
+	if (handle_command) {
+		handle_command = 0;
+		if(command_buff.nCurReadPos)
+		{
+     		printf_fast("Processing Command\r\n");
+			// do the command
+			nRet = doCommand();
+			//re-initialise the command buffer for the next one.
+			init_command_buff(&command_buff);
+			// break out if we got a breaking command
+			if(!nRet)
+				return nRet;
+		}
+	}
+
 	return nRet;
 }
 
@@ -1901,6 +1947,23 @@ void LineStateChangeCallback(uint8 state)
 }
 
 //extern void basicUsbInit();
+static inline void sleepBLE() {
+	send_data("AT+SLEEP", 8);
+	waitDoingServices(1000,1);
+	ble_connected = 0;
+}
+
+static inline void wakeBLE() {
+	uint8 i;
+	while(uart1TxAvailable() < 100) {};
+	for(i=0; i < 100; i++)
+	{
+		uart1TxSendByte(0x6F);
+	}
+	while(uart1TxAvailable()<255) waitDoingServices(20,1);
+	waitDoingServices(1000,1);
+}
+
 
 void main()
 {   
@@ -1922,7 +1985,6 @@ void main()
 	setPort1PullType(LOW);	// configure the P1_2 and P1_3 IO pins
 	setDigitalInput(12, PULLED);
 	P0INP = 0x1;			// initialize analogue Input 0
-
 	LED_RED(1);
 	waitDoingServices(5000, 0);	//delay for 5 seconds to get a serial terminal up for debugging.
 	LED_RED(0);
@@ -1930,17 +1992,17 @@ void main()
 	printf_fast("Starting xBridge v%s\r\nRetrieving Settings\r\n", VERSION);
 	memcpy(&settings, (__xdata *)FLASH_SETTINGS, sizeof(settings));
 
-	//detect if we have xBridge or classic hardware
-	setDigitalOutput(10, HIGH);	//turn on HM-1x using P1_0
-
-	tmp_ms = getMs();
-	while (getMs() < tmp_ms + 1000) if(P1_2) break;	//if P1_2 goes high in 1s, it is xBridge
-	if(!P1_2) setFlag(XBRIDGE_HW, 0);
+	//this is only for ble connected to 3.3V, so no detecting of circuits.
 
 	waitDoingServices(1000, 0);			// wait 1 seconds, just in case it needs to settle.
 	init_command_buff(&command_buff);	// initialize the command buffer
 
 	openUart();							// Open the UART and set it up for comms to HM-10
+
+
+	printf_fast("Configure BLE\r\n");
+	wakeBLE();
+	waitDoingServices(1000, 1);			// wait 1 seconds, just in case it needs to settle.
 
 	// configure the bluetooth module
 	if(getFlag(BLE_INITIALISED)) {		// if we haven't written a 0 into the appropriate flag...
@@ -1953,17 +2015,15 @@ void main()
 	if(settings.battery_minimum == 0xFFFF || settings.battery_maximum == 0xFFFF) {
 		if (getFlag(XBRIDGE_HW)) {
 			printf_fast("xBridge hardware circuit selected\r\n");
-			setFlag(SLEEP_BLE, 1);
-			setFlag(DONT_IGNORE_BLE_STATE, 1);
 			settings.battery_maximum = BATTERY_MAXIMUM;
 			settings.battery_minimum = BATTERY_MINIMUM;
 		} else {
 			printf_fast("xDrip-wixel hardware circuit selected\r\n");
-			setFlag(SLEEP_BLE, 0);
-			setFlag(DONT_IGNORE_BLE_STATE, 0);
 			settings.battery_maximum = BATTERY_MAXIMUM_CLASSIC;
 			settings.battery_minimum = BATTERY_MINIMUM_CLASSIC;
 		}
+		setFlag(DONT_IGNORE_BLE_STATE, 0);
+		setFlag(SLEEP_BLE, 1);
 		save_settings = 1;
 		sleep_ble = getFlag(SLEEP_BLE);
 		send_debug = getFlag(SEND_DEBUG);
@@ -1985,7 +2045,7 @@ void main()
 	initialised = 1;
 
 	// set my transmitter's tx id... no waiting for beacon on reflash
-	//settings.dex_tx_id = 6734410;
+	settings.dex_tx_id = 6734410;
 
 	while (settings.dex_tx_id == 0) {
 		if (send_debug) printf_fast("No dex_tx_id.  Sending beacon.\r\n");
@@ -2016,7 +2076,7 @@ void main()
 	Pkts.read = 0;
 	Pkts.write = 0;
 
-	setDigitalOutput(10, LOW);
+	sleepBLE();
 	ble_connected = 0;
 
 	while (1) {
@@ -2030,7 +2090,7 @@ void main()
 			do_sleep = 1; // we got a packet, so we are aligned with the 5 minute interval - so go to sleep after sending out packets
 		} else {
 			printf_fast("%lu - did not receive a pkt with %d pkts in queue\r\n", getMs(), (Pkts.write - Pkts.read));
-			setDigitalOutput(10, HIGH);
+			wakeBLE();
 			if (ble_connected) sendBeacon();
 			do_sleep = 0; // we did not receive a packet, so do not sleep but keep looking for the next one..
 		}
@@ -2041,7 +2101,7 @@ void main()
 			// we wait up to one minute for BLE connect
 			while (!ble_connected && ((getMs() - pkt_time) < 60000)) {
 				if (send_debug) printf_fast("%lu - packet waiting for ble connect\r\n", getMs());
-				setDigitalOutput(10, HIGH);
+				wakeBLE();
 				waitDoingServicesInterruptible(10000, ble_connected, 1);
 			}
 
@@ -2063,7 +2123,7 @@ void main()
 
 		if (do_sleep) {
 			// turn off the BLE module
-			setDigitalOutput(10, LOW);
+			sleepBLE();
 			ble_connected = 0;
 		}
 		// wait for stuff to settle
