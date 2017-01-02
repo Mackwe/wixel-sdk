@@ -901,6 +901,7 @@ void makeAllOutputs(BIT value)
     int i;
     for (i=10;i <= 17; i++)
 	{
+    	if (i == 11) continue;
 		setDigitalOutput(i, value);
     }
 }
@@ -1295,6 +1296,12 @@ void configBt() {
 */	length = sprintf(msg_buf, "AT+NAMExBridge%02x%02x", serialNumber[0],serialNumber[1]);
     send_data(msg_buf, length);
 	waitDoingServices(500,1);
+	length = sprintf(msg_buf, "AT+NOTI1");
+	send_data(msg_buf, length);
+	waitDoingServices(500,1);
+	length = sprintf(msg_buf, "AT+PWRM0");
+	send_data(msg_buf, length);
+	waitDoingServices(500,1);
 /*	length = sprintf(msg_buf, "AT+RELI1");
     send_data(msg_buf, length);
 	waitDoingServices(500,0,1);	
@@ -1659,7 +1666,7 @@ int controlProtocolService()
 		else {
 			b = uart1RxReceiveByte();
 		}
-		putchar(b);
+		//putchar(b);
 //		if(send_debug)
 //			printf_fast("%c",b);
 		command_buff.commandBuffer[command_buff.nCurReadPos] = b;
@@ -1677,9 +1684,6 @@ int controlProtocolService()
 			handle_command = 1;
 		}
 		else if (command_buff.nCurReadPos >= 1 && (command_buff.commandBuffer[0] == 0x4F)) { // 'O'
-			printf_fast("\r\n%lu OK_BUFFER (%u): ", getMs(), command_buff.nCurReadPos);
-			for (i=0; i<command_buff.nCurReadPos;i++) putchar(command_buff.commandBuffer[i]);
-
 			if ((command_buff.nCurReadPos == 1) && !waiting_ok) {  // 'OK' --> OK,OK+SLEE,OK+WAKE
 				// we got something that starts starts with an "OK" - we want to wait for 100ms for further chars...
 				waiting_ok = 1;
@@ -1700,7 +1704,7 @@ int controlProtocolService()
 	}
 	//if we timed out waiting for an OK command completion, run the command
 	if (waiting_ok && ((getMs() - ts_waiting) > 100)) {
-		printf_fast("\r\nOK TIMEOUT\r\n");
+		//printf_fast("\r\nOK TIMEOUT\r\n");
 		waiting_ok = 0;
 		handle_command = 1;
 	}
@@ -1709,7 +1713,9 @@ int controlProtocolService()
 		handle_command = 0;
 		if(command_buff.nCurReadPos)
 		{
-     		printf_fast("Processing Command\r\n");
+     		printf_fast("\r\nProcessing Command (%u): ", command_buff.nCurReadPos);
+     		for (i=0; i<command_buff.nCurReadPos;i++) putchar(command_buff.commandBuffer[i]);
+     		printf_fast("\r\n");
 			// do the command
 			nRet = doCommand();
 			//re-initialise the command buffer for the next one.
@@ -1951,22 +1957,26 @@ void LineStateChangeCallback(uint8 state)
 
 //extern void basicUsbInit();
 static inline void sleepBLE() {
+	printf_fast("sleepBLE()\r\n");
+	if (isPinHigh(12)) {
+		printf_fast("disconnecting from host\r\n");
+		setDigitalOutput(11, LOW);
+		waitDoingServices(2000,1);
+		setDigitalOutput(11, HIGH);
+	} else {
+		printf_fast("already disconnected from host\r\n");
+	}
 	send_data("AT+SLEEP", 8);
 	waitDoingServices(500,1);
 	ble_connected = 0;
 }
 
 static inline void wakeBLE() {
-	uint8 i;
-	while(uart1TxAvailable() < 100) {};
-	for(i=0; i < 80; i++)
-	{
-		uart1TxSendByte(0x4F);
-	}
-	while(uart1TxAvailable()<255) waitDoingServices(20,1);
-	waitDoingServices(500,1);
+	printf_fast("wakeBLE()\r\n");
+	setDigitalOutput(11, LOW);
+	waitDoingServices(1500,1);
+	setDigitalOutput(11, HIGH);
 }
-
 
 void main()
 {   
@@ -1986,7 +1996,8 @@ void main()
 	usbComRequestLineStateChangeNotification(LineStateChangeCallback);	// implement the USB line State Changed callback function.
 	setPort1PullType(LOW);	// configure the P1_2 and P1_3 IO pins
 	setDigitalInput(12, PULLED);
-	setDigitalOutput(11, HIGH_IMPEDANCE);
+	setDigitalOutput(11, HIGH);
+
 	P0INP = 0x1;			// initialize analogue Input 0
 	LED_RED(1);
 	waitDoingServices(5000, 0);	//delay for 5 seconds to get a serial terminal up for debugging.
@@ -2000,16 +2011,16 @@ void main()
 	waitDoingServices(1000, 0);			// wait 1 seconds, just in case it needs to settle.
 	init_command_buff(&command_buff);	// initialize the command buffer
 
-	settings.uart_baudrate = 0xffffffff;
+	settings.uart_baudrate = 9600;
 	openUart();							// Open the UART and set it up for comms to HM-10
 	waitDoingServices(1000, 1);			// wait 1 seconds, just in case it needs to settle.
 
 
 	printf_fast("Configure BLE\r\n");
-	if (!got_ok) wakeBLE();
+	//if (!got_ok) wakeBLE();
 
 	// configure the bluetooth module
-	if(getFlag(BLE_INITIALISED)) {		// if we haven't written a 0 into the appropriate flag...
+	if(1 || getFlag(BLE_INITIALISED)) {		// if we haven't written a 0 into the appropriate flag...
 		configBt();						// configure the BT module
 		setFlag(BLE_INITIALISED, 0);	// set the flag to 0
 		save_settings = 1;				// set up the value for writing to flash
@@ -2049,7 +2060,7 @@ void main()
 	initialised = 1;
 
 	// set my transmitter's tx id... no waiting for beacon on reflash
-	settings.dex_tx_id = 6734410;
+	//settings.dex_tx_id = 6734410;
 
 	while (settings.dex_tx_id == 0) {
 		if (send_debug) printf_fast("No dex_tx_id.  Sending beacon.\r\n");
@@ -2081,6 +2092,7 @@ void main()
 	Pkts.write = 0;
 
 	ble_connected = 0;
+	sleepBLE();
 
 	while (1) {
 		scanning_for_packet = 1;
