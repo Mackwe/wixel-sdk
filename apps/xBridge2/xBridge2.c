@@ -1474,6 +1474,7 @@ void openUart()
 	uart1SetParity(0);
 	uart1SetStopBits(1);
 	uartEnable();
+	got_ok = 0;
 	//detect HM-1x baudrate, if not currently set
 	if(settings.uart_baudrate >230400) {
 		if(send_debug)
@@ -1639,7 +1640,9 @@ int controlProtocolService()
 	if ((command_buff.nCurReadPos > 0) && ((getMs() - cmd_to) > 2000))
 	{
 		//if we have timed out waiting for a command, clear the command buffer and return.
-		printf_fast("\r\nCMD TIMEOUT\r\n");
+		printf_fast("\r\nCMD TIMEOUT with buffer (%u): ", command_buff.nCurReadPos);
+		for (i=0; i<command_buff.nCurReadPos;i++) putchar(command_buff.commandBuffer[i]);
+		printf_fast("\r\n");
 		// clear command buffer if there was anything
 		init_command_buff(&command_buff);
 		return nRet;
@@ -1949,19 +1952,19 @@ void LineStateChangeCallback(uint8 state)
 //extern void basicUsbInit();
 static inline void sleepBLE() {
 	send_data("AT+SLEEP", 8);
-	waitDoingServices(1000,1);
+	waitDoingServices(500,1);
 	ble_connected = 0;
 }
 
 static inline void wakeBLE() {
 	uint8 i;
 	while(uart1TxAvailable() < 100) {};
-	for(i=0; i < 100; i++)
+	for(i=0; i < 80; i++)
 	{
-		uart1TxSendByte(0x6F);
+		uart1TxSendByte(0x4F);
 	}
 	while(uart1TxAvailable()<255) waitDoingServices(20,1);
-	waitDoingServices(1000,1);
+	waitDoingServices(500,1);
 }
 
 
@@ -1997,12 +2000,13 @@ void main()
 	waitDoingServices(1000, 0);			// wait 1 seconds, just in case it needs to settle.
 	init_command_buff(&command_buff);	// initialize the command buffer
 
+	settings.uart_baudrate = 0xffffffff;
 	openUart();							// Open the UART and set it up for comms to HM-10
+	waitDoingServices(1000, 1);			// wait 1 seconds, just in case it needs to settle.
 
 
 	printf_fast("Configure BLE\r\n");
-	wakeBLE();
-	waitDoingServices(1000, 1);			// wait 1 seconds, just in case it needs to settle.
+	if (!got_ok) wakeBLE();
 
 	// configure the bluetooth module
 	if(getFlag(BLE_INITIALISED)) {		// if we haven't written a 0 into the appropriate flag...
@@ -2076,7 +2080,6 @@ void main()
 	Pkts.read = 0;
 	Pkts.write = 0;
 
-	sleepBLE();
 	ble_connected = 0;
 
 	while (1) {
@@ -2098,10 +2101,10 @@ void main()
 
 		//TODO: what happens if we did not receive a packet? pkt_time is still set to the last one - this will make the following checks fail...
 		if (Pkts.read != Pkts.write) { // if we have a packet
+			wakeBLE();
 			// we wait up to one minute for BLE connect
 			while (!ble_connected && ((getMs() - pkt_time) < 60000)) {
 				if (send_debug) printf_fast("%lu - packet waiting for ble connect\r\n", getMs());
-				wakeBLE();
 				waitDoingServicesInterruptible(10000, ble_connected, 1);
 			}
 
@@ -2129,7 +2132,7 @@ void main()
 		// wait for stuff to settle
 		waitDoingServices(1000, 1);
 
-		if (do_sleep) {
+		if (0) {
 			// save all Port Interrupts state (enabled/disabled).
 		    uint8 savedPICTL = PICTL;
 			// save port 0 Interrupt Enable state.  This is a BIT value and equates to IEN1.POIE.
