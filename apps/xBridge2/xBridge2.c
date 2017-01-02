@@ -1984,9 +1984,9 @@ void main()
 	MCSM2 = 0x17;			// terminate receiving on drop of carrier, but keep it up when packet quality is good.
 
 	usbComRequestLineStateChangeNotification(LineStateChangeCallback);	// implement the USB line State Changed callback function.
-
 	setPort1PullType(LOW);	// configure the P1_2 and P1_3 IO pins
 	setDigitalInput(12, PULLED);
+	setDigitalOutput(11, HIGH_IMPEDANCE);
 	P0INP = 0x1;			// initialize analogue Input 0
 	LED_RED(1);
 	waitDoingServices(5000, 0);	//delay for 5 seconds to get a serial terminal up for debugging.
